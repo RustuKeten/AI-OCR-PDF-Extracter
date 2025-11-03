@@ -5,7 +5,9 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { SignOutModal } from "@/components/sign-out-modal";
 import { useState } from "react";
+import toast from "react-hot-toast";
 import {
   FileText,
   Settings,
@@ -29,9 +31,44 @@ export function Navigation({
   const { data: session } = useSession();
   const router = useRouter();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
+  const [showSignOutModal, setShowSignOutModal] = useState(false);
 
-  const handleSignOut = async () => {
-    await signOut({ callbackUrl: "/" });
+  const handleSignOutClick = () => {
+    // Close mobile menu if open
+    setMobileMenuOpen(false);
+    // Show confirmation modal
+    setShowSignOutModal(true);
+  };
+
+  const handleConfirmSignOut = async () => {
+    try {
+      setIsSigningOut(true);
+
+      // Show toast notification
+      toast.loading("Signing out...", { id: "signout" });
+
+      // Sign out with callback to home page
+      // Using redirect: true to let NextAuth handle the redirect
+      await signOut({
+        callbackUrl: "/",
+        redirect: true,
+      });
+
+      // This won't execute if redirect happens, but toast will show
+      toast.success("Signed out successfully", { id: "signout" });
+    } catch (error) {
+      console.error("Sign out error:", error);
+      toast.error("Failed to sign out. Please try again.", { id: "signout" });
+      setIsSigningOut(false);
+      setShowSignOutModal(false);
+    }
+  };
+
+  const handleCloseSignOutModal = () => {
+    if (!isSigningOut) {
+      setShowSignOutModal(false);
+    }
   };
 
   const handleTryItNow = () => {
@@ -159,10 +196,11 @@ export function Navigation({
 
             {/* Desktop sign out */}
             <Button
-              onClick={handleSignOut}
+              onClick={handleSignOutClick}
               variant="outline"
               size="sm"
-              className="hidden md:flex border-gray-300 dark:border-gray-600 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 hover:border-gray-400 dark:hover:border-gray-500"
+              disabled={isSigningOut}
+              className="hidden md:flex border-gray-300 dark:border-gray-600 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 hover:border-gray-400 dark:hover:border-gray-500 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <LogOut className="h-4 w-4 mr-2" />
               Sign Out
@@ -212,13 +250,11 @@ export function Navigation({
                 </p>
               </div>
               <Button
-                onClick={() => {
-                  handleSignOut();
-                  setMobileMenuOpen(false);
-                }}
+                onClick={handleSignOutClick}
                 variant="outline"
                 size="sm"
-                className="w-full justify-start text-gray-900 dark:text-white border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800"
+                disabled={isSigningOut}
+                className="w-full justify-start text-gray-900 dark:text-white border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <LogOut className="h-4 w-4 mr-2" />
                 Sign Out
@@ -226,8 +262,15 @@ export function Navigation({
             </div>
           </div>
         )}
+
+        {/* Sign Out Confirmation Modal */}
+        <SignOutModal
+          isOpen={showSignOutModal}
+          onClose={handleCloseSignOutModal}
+          onConfirm={handleConfirmSignOut}
+          isSigningOut={isSigningOut}
+        />
       </div>
     </nav>
   );
 }
-
