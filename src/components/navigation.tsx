@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { SignOutModal } from "@/components/sign-out-modal";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import toast from "react-hot-toast";
 import {
   FileText,
@@ -33,6 +33,7 @@ export function Navigation({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [showSignOutModal, setShowSignOutModal] = useState(false);
+  const [planType, setPlanType] = useState<string>("FREE");
 
   const handleSignOutClick = () => {
     // Close mobile menu if open
@@ -74,6 +75,27 @@ export function Navigation({
   const handleTryItNow = () => {
     router.push("/auth/signin");
   };
+
+  // Fetch plan type when user is logged in
+  useEffect(() => {
+    if (session?.user?.id) {
+      const fetchPlanType = async () => {
+        try {
+          const response = await fetch("/api/files/credits");
+          if (response.ok) {
+            const data = await response.json();
+            setPlanType(data.planType || "FREE");
+          }
+        } catch (error) {
+          console.error("Error fetching plan type:", error);
+        }
+      };
+      fetchPlanType();
+      // Poll every 5 seconds to update plan type (in case subscription was updated)
+      const interval = setInterval(fetchPlanType, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [session]);
 
   // Public navigation (for home page)
   if (showPublicNav || !session) {
@@ -164,8 +186,16 @@ export function Navigation({
           <div className="flex items-center space-x-2 sm:space-x-4">
             <div className="hidden sm:flex items-center space-x-3">
               <div className="flex items-center space-x-2">
-                <Badge className="bg-purple-900 text-purple-300 border-purple-700">
-                  FREE
+                <Badge
+                  className={
+                    planType === "PRO"
+                      ? "bg-purple-900 text-purple-300 border-purple-700"
+                      : planType === "BASIC"
+                      ? "bg-blue-900 text-blue-300 border-blue-700"
+                      : "bg-gray-700 text-gray-300 border-gray-600"
+                  }
+                >
+                  {planType}
                 </Badge>
               </div>
               <div className="hidden lg:block text-right">
