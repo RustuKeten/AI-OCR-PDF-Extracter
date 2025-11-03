@@ -102,6 +102,22 @@ export default function DashboardPage() {
       const data = await response.json();
 
       if (!response.ok) {
+        // Check if it's an insufficient credits error (402 status)
+        if (response.status === 402 && data.error === "Insufficient credits") {
+          toast.error(
+            data.message ||
+              "You don't have enough credits to process this file.",
+            {
+              duration: 5000,
+              icon: "⚠️",
+            }
+          );
+          // Navigate to settings page after a short delay
+          setTimeout(() => {
+            router.push("/settings");
+          }, 2000);
+          return;
+        }
         throw new Error(data.error || "Upload failed");
       }
 
@@ -271,4 +287,3 @@ export default function DashboardPage() {
     </div>
   );
 }
-
