@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Ensure pdf-parse is properly bundled for Vercel serverless functions
+  serverExternalPackages: ["pdf-parse"],
 };
 
 export default nextConfig;

@@ -111,15 +111,12 @@ export async function GET() {
 
 // --- Helper: extract text from text-based PDF pages ---
 async function extractTextFromPDF(buffer: Buffer): Promise<string> {
-  // Use pdf-parse for text extraction (simpler, no worker issues)
-  const { createRequire } = await import("module");
-  const require = createRequire(
-    new URL(import.meta.url).pathname || process.cwd() + "/package.json"
-  );
-  const { PDFParse } = require("pdf-parse");
+  // Use dynamic import at runtime (works in Vercel serverless)
+  const pdfParseModule = await import("pdf-parse");
+  const PDFParse = (pdfParseModule as any).PDFParse;
 
   if (typeof PDFParse !== "function") {
-    throw new Error("PDFParse class not found");
+    throw new Error("PDFParse class not found in pdf-parse module");
   }
 
   // PDFParse is a class, instantiate it and call getText()
@@ -132,12 +129,13 @@ async function extractTextFromPDF(buffer: Buffer): Promise<string> {
 
 // --- Helper: convert image-only PDF pages to base64 for GPT OCR ---
 async function extractImagesAsBase64(buffer: Buffer) {
-  // Use pdf-parse's getScreenshot method which handles image extraction better
-  const { createRequire } = await import("module");
-  const require = createRequire(
-    new URL(import.meta.url).pathname || process.cwd() + "/package.json"
-  );
-  const { PDFParse } = require("pdf-parse");
+  // Use dynamic import at runtime (works in Vercel serverless)
+  const pdfParseModule = await import("pdf-parse");
+  const PDFParse = (pdfParseModule as any).PDFParse;
+
+  if (typeof PDFParse !== "function") {
+    throw new Error("PDFParse class not found in pdf-parse module");
+  }
 
   // Use PDFParse class to get screenshots of PDF pages
   // Use very low scale and small width to reduce token usage significantly

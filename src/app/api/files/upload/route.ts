@@ -128,13 +128,15 @@ export async function POST(req: Request) {
 
       // Prepare messages based on whether it's image-based or text-based
       let messages: any[];
-      
+
       if (isImageBased) {
         // For image-based PDFs, extract the base64 image from the prompt text
         // The extractImagesAsBase64 function returns: "This PDF contains scanned images. Please perform OCR on the following base64-encoded PNG image and extract the resume data:\n${imageData}"
         // where imageData is a full data URL like "data:image/png;base64,iVBORw0KGgo..."
-        const imageMatch = extractedText.match(/data:image\/[^;]+;base64,([^\s\n]+)/);
-        
+        const imageMatch = extractedText.match(
+          /data:image\/[^;]+;base64,([^\s\n]+)/
+        );
+
         if (imageMatch && imageMatch[1]) {
           // Use vision API for image-based PDFs
           const base64Image = imageMatch[1];
@@ -333,14 +335,12 @@ IMPORTANT: Do not return empty strings or empty arrays unless the information is
 
 // Helper functions (same as /api/extract)
 async function extractTextFromPDF(buffer: Buffer): Promise<string> {
-  const { createRequire } = await import("module");
-  const require = createRequire(
-    new URL(import.meta.url).pathname || process.cwd() + "/package.json"
-  );
-  const { PDFParse } = require("pdf-parse");
+  // Use dynamic import at runtime (works in Vercel serverless)
+  const pdfParseModule = await import("pdf-parse");
+  const PDFParse = (pdfParseModule as any).PDFParse;
 
   if (typeof PDFParse !== "function") {
-    throw new Error("PDFParse class not found");
+    throw new Error("PDFParse class not found in pdf-parse module");
   }
 
   const pdfParser = new PDFParse({ data: buffer });
@@ -351,11 +351,13 @@ async function extractTextFromPDF(buffer: Buffer): Promise<string> {
 }
 
 async function extractImagesAsBase64(buffer: Buffer) {
-  const { createRequire } = await import("module");
-  const require = createRequire(
-    new URL(import.meta.url).pathname || process.cwd() + "/package.json"
-  );
-  const { PDFParse } = require("pdf-parse");
+  // Use dynamic import at runtime (works in Vercel serverless)
+  const pdfParseModule = await import("pdf-parse");
+  const PDFParse = (pdfParseModule as any).PDFParse;
+
+  if (typeof PDFParse !== "function") {
+    throw new Error("PDFParse class not found in pdf-parse module");
+  }
 
   const pdfParser = new PDFParse({ data: buffer });
   const screenshotResult = await pdfParser.getScreenshot({
@@ -393,4 +395,3 @@ async function extractImagesAsBase64(buffer: Buffer) {
 
   return `This PDF contains scanned images. Please perform OCR on the following base64-encoded PNG image and extract the resume data:\n${imageData}`;
 }
-
