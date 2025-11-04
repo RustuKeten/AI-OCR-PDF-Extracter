@@ -173,8 +173,17 @@ IMPORTANT: Do not return empty strings or empty arrays unless the information is
       } catch (error) {
         console.error("[Upload] Image extraction error:", error);
         const errorMsg = error instanceof Error ? error.message : String(error);
+        
+        // Check if it's a worker-related error
+        if (errorMsg.includes("worker") || errorMsg.includes("pdfjs-dist")) {
+          throw new Error(
+            "Image-based PDF processing is currently unavailable. Please convert your PDF to a text-based format or use a different PDF file."
+          );
+        }
+        
+        // Generic user-friendly error message
         throw new Error(
-          `PDF appears to be image-based but could not be processed. ${errorMsg}. Please try a different PDF or ensure it's text-based.`
+          "Unable to process this image-based PDF. Please ensure the PDF is in a standard format or convert it to a text-based PDF."
         );
       }
     } else {
@@ -264,8 +273,29 @@ IMPORTANT: Do not return empty strings or empty arrays unless the information is
     });
   } catch (error: unknown) {
     console.error("[Upload] Processing error:", error);
-    const message =
-      error instanceof Error ? error.message : "Unknown error occurred";
+    
+    // Get user-friendly error message
+    let userMessage = "Failed to process PDF. Please try again or use a different file.";
+    
+    if (error instanceof Error) {
+      const errorMsg = error.message;
+      
+      // Map technical errors to user-friendly messages
+      if (errorMsg.includes("worker") || errorMsg.includes("pdfjs-dist") || errorMsg.includes("Cannot find module")) {
+        userMessage = "Image-based PDF processing is currently unavailable. Please use a text-based PDF or convert your PDF to a text-based format.";
+      } else if (errorMsg.includes("Insufficient credits")) {
+        userMessage = errorMsg; // Keep credit errors as-is
+      } else if (errorMsg.includes("image-based") || errorMsg.includes("OCR")) {
+        userMessage = "Unable to process this image-based PDF. Please ensure the PDF contains selectable text or convert it to a text-based PDF.";
+      } else if (errorMsg.includes("timeout")) {
+        userMessage = "PDF processing timed out. Please try with a smaller file or ensure the PDF is not corrupted.";
+      } else if (errorMsg.includes("corrupted") || errorMsg.includes("invalid")) {
+        userMessage = "The PDF file appears to be corrupted or invalid. Please try with a different PDF file.";
+      } else if (errorMsg.length < 200) {
+        // If error message is short and user-friendly, use it
+        userMessage = errorMsg;
+      }
+    }
 
     // Update file status to failed if fileRecord was created
     try {
@@ -281,7 +311,7 @@ IMPORTANT: Do not return empty strings or empty arrays unless the information is
             fileId: fileRecord.id,
             action: "extract",
             status: "failed",
-            message: `Processing failed: ${message}`,
+            message: `Processing failed: ${error instanceof Error ? error.message : "Unknown error"}`,
           },
         });
       }
@@ -289,7 +319,7 @@ IMPORTANT: Do not return empty strings or empty arrays unless the information is
       console.error("[Upload] Failed to update file status:", updateError);
     }
 
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: userMessage }, { status: 500 });
   }
 }
 
@@ -382,48 +412,66 @@ async function extractTextFromPDF(buffer: Buffer): Promise<string> {
 }
 
 async function extractImagesAsBase64(buffer: Buffer): Promise<string> {
-  // Use pdf-parse's getScreenshot method (works in Vercel serverless)
-  // CRITICAL: DOMMatrix polyfill must be loaded before pdf-parse
-  await import("@/lib/dom-matrix-polyfill");
+  // Attempt to use pdf-parse with worker configuration for image extraction
+  // Configure pdfjs-dist to disable workers before importing pdf-parse
+  
+  try {
+    // Set environment variables to disable workers
+    process.env.PDFJS_DISABLE_WORKER = "true";
+    
+    // Load DOMMatrix polyfill first
+    await import("@/lib/dom-matrix-polyfill");
+    
+    // Note: pdfjs-dist is bundled inside pdf-parse, so we can't configure it directly
+    // The DOMMatrix polyfill should be sufficient for basic functionality
+    
+    const pdfParseModule = await import("pdf-parse");
+    const PDFParse = (pdfParseModule as any).PDFParse;
+    const pdfParser = new PDFParse({ data: buffer });
 
-  const pdfParseModule = await import("pdf-parse");
-  const PDFParse = (pdfParseModule as any).PDFParse;
-  const pdfParser = new PDFParse({ data: buffer });
+    const screenshotResult = await pdfParser.getScreenshot({
+      first: 1,
+      last: 1,
+      scale: 0.5,
+      imageDataUrl: true,
+      imageBuffer: false,
+      desiredWidth: 1200,
+    });
 
-  const screenshotResult = await pdfParser.getScreenshot({
-    first: 1,
-    last: 1, // Only first page to reduce token usage
-    scale: 0.5, // Medium scale for better OCR quality
-    imageDataUrl: true,
-    imageBuffer: false,
-    desiredWidth: 1200, // Higher width for better OCR
-  });
+    const pages: string[] = [];
 
-  const pages: string[] = [];
-
-  // Extract base64 images from screenshot result (only first page)
-  for (const pageData of screenshotResult.pages || []) {
-    if (pageData.dataUrl) {
-      pages.push(pageData.dataUrl);
-      break;
+    for (const pageData of screenshotResult.pages || []) {
+      if (pageData.dataUrl) {
+        pages.push(pageData.dataUrl);
+        break;
+      }
     }
+
+    if (pages.length === 0) {
+      throw new Error("Failed to extract images from PDF");
+    }
+
+    const imageData = pages[0];
+    const imageSize = imageData.length;
+
+    if (imageSize > 4000000) {
+      throw new Error(
+        `Image is too large (${(imageSize / 1024).toFixed(0)}KB base64). Please use a smaller PDF.`
+      );
+    }
+
+    return imageData;
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    
+    // If it's a worker error, throw a user-friendly message
+    if (errorMsg.includes("worker") || errorMsg.includes("pdfjs-dist") || errorMsg.includes("Cannot find module")) {
+      throw new Error(
+        "Image-based PDF processing is currently unavailable. Please use a text-based PDF or convert your scanned PDF to a text-based format."
+      );
+    }
+    
+    // Re-throw other errors
+    throw error;
   }
-
-  if (pages.length === 0) {
-    throw new Error("Failed to extract images from PDF");
-  }
-
-  const imageData = pages[0];
-  const imageSize = imageData.length;
-
-  // If image is too large (base64 size > 4MB), return error
-  if (imageSize > 4000000) {
-    throw new Error(
-      `Image is too large (${(imageSize / 1024).toFixed(
-        0
-      )}KB base64). Please use a smaller PDF or ensure it's text-based.`
-    );
-  }
-
-  return imageData;
 }

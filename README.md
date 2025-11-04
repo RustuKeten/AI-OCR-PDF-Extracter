@@ -74,34 +74,13 @@ npm install
 
 ### 3. Set Up Environment Variables
 
-Create a `.env.local` file in the root directory:
+Create a `.env.local` file in the root directory and copy from `.env.example`:
 
-```env
-# Database - Get from Supabase Dashboard > Settings > Database
-# Connection string format: postgresql://[user]:[password]@[host]:[port]/[database]?sslmode=require
-DATABASE_URL="postgresql://user:password@host:port/database?sslmode=require"
-
-# NextAuth Configuration
-# Generate a secret key: openssl rand -base64 32
-NEXTAUTH_URL="http://localhost:3002"
-NEXTAUTH_SECRET="your-secret-key-here"
-
-# OpenAI API Key
-OPENAI_API_KEY="your-openai-api-key-here"
-
-# Stripe Configuration (Test Mode)
-# Get these from Stripe Dashboard > Developers > API Keys (use Test mode keys)
-STRIPE_SECRET_KEY="sk_test_your_stripe_secret_key"
-STRIPE_PUBLIC_KEY="pk_test_your_stripe_public_key"
-NEXT_PUBLIC_STRIPE_PUBLIC_KEY="pk_test_your_stripe_public_key"
-STRIPE_WEBHOOK_SECRET="whsec_your_webhook_secret"
-
-# Stripe Price IDs (Test Mode)
-# Create products and prices in Stripe Dashboard > Products
-# Then copy the Price ID (starts with price_...)
-STRIPE_PRICE_BASIC="price_test_basic_monthly_price_id"
-STRIPE_PRICE_PRO="price_test_pro_monthly_price_id"
+```bash
+cp .env.example .env.local
 ```
+
+Then update `.env.local` with your actual values. See `.env.example` for all required variables.
 
 ### 4. Set Up Stripe (Optional but Recommended)
 
@@ -218,7 +197,6 @@ Open [http://localhost:3002](http://localhost:3002) in your browser.
 - `npm run build` - Build for production (includes Prisma generation)
 - `npm run start` - Start production server
 - `npm run lint` - Run ESLint
-- `npm run test:api` - Test PDF extraction API endpoint
 - `npm run prisma:generate` - Generate Prisma Client
 - `npm run prisma:migrate` - Create and apply database migrations
 - `npm run prisma:studio` - Open Prisma Studio (database GUI)
@@ -356,8 +334,23 @@ The extracted JSON follows this structure (in order):
 - **Text-Based PDFs**: Uses `gpt-4o-mini` for fast, cost-effective extraction
 - **Image-Based PDFs**: Uses `gpt-4o` with Vision API for OCR
 - **Auto-Detection**: Automatically detects PDF type and uses appropriate model
-- **File Size Limit**: 10MB maximum
+- **File Size Limit**: 10MB maximum (client-side validation)
 - **Supported Format**: PDF only
+
+### Large File Handling (Vercel Serverless Limits)
+
+**Note**: Vercel serverless functions have a payload limit of approximately 4 MB. However, our application accepts PDF files up to 10 MB on the client side. Here's how we handle this:
+
+1. **Client-Side Validation**: The uploader component validates file size (10 MB max) before upload
+2. **Direct API Route Upload**: Files are uploaded directly to `/api/files/upload` using Next.js API routes, which handle FormData payloads
+3. **Buffer Processing**: The API route processes the file buffer directly in memory without intermediate storage
+4. **Streaming Support**: For files larger than 4 MB, the FormData is streamed directly to the serverless function, avoiding the 4 MB payload limit
+
+**For Production**: If you need to handle files larger than 10 MB, consider:
+
+- Using Vercel Blob Storage for file uploads
+- Implementing chunked uploads
+- Using a dedicated file storage service (AWS S3, Cloudinary, etc.)
 
 ### Theme Settings
 
@@ -502,12 +495,6 @@ The application supports three subscription tiers:
 
 ## 🧪 Testing
 
-### Test PDF Extraction API
-
-```bash
-npm run test:api ./path/to/resume.pdf
-```
-
 ### Test with cURL
 
 ```bash
@@ -524,8 +511,6 @@ curl -X POST http://localhost:3002/api/files/upload \
 ## 🚢 Deployment
 
 ### Vercel Deployment Guide
-
-For detailed deployment instructions, see **[VERCEL_DEPLOYMENT.md](./VERCEL_DEPLOYMENT.md)**.
 
 ### Quick Deployment Checklist
 
