@@ -34,12 +34,20 @@ export async function POST(req: Request) {
 
     const buffer = Buffer.from(await file.arrayBuffer());
 
-    // --- Step 1: Try extracting text directly ---
+    // --- Step 1: Extract text from PDF using pdf-parse (works on Vercel) ---
+    console.log(
+      `[Extract] Starting PDF text extraction for file: ${file.name} (${file.size} bytes)`
+    );
+
     const PDFParse = await initPdfTools();
     const pdfParser = new PDFParse({ data: buffer });
     const pdfData = await pdfParser.getText();
-    let extractedText = pdfData.text?.trim() || "";
+    const extractedText = pdfData.text?.trim() || "";
     let isImageBased = false;
+
+    console.log(
+      `[Extract] PDF text extraction complete. Extracted ${extractedText.length} characters`
+    );
 
     // --- Step 2: Check if image-based and prepare messages ---
     const JSON_TEMPLATE = createEmptyResumeTemplate();

@@ -27,13 +27,16 @@ export const maxDuration = 60;
 const CREDITS_REQUIRED = 100;
 
 export async function POST(req: Request) {
+  let fileRecord: { id: string; fileName: string; fileSize: number } | null = null;
+  let userId: string | undefined = undefined;
+  
   try {
     const session = await getServerSession(authOptions);
     if (!session?.user?.email || !session.user.id) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const userId = session.user.id;
+    userId = session.user.id;
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
@@ -70,7 +73,7 @@ export async function POST(req: Request) {
     const buffer = Buffer.from(await file.arrayBuffer());
 
     // --- Create file record ---
-    const fileRecord = await prisma.file.create({
+    fileRecord = await prisma.file.create({
       data: {
         fileName: file.name,
         fileSize: file.size,
@@ -90,12 +93,20 @@ export async function POST(req: Request) {
       },
     });
 
-    // --- Extract text from PDF ---
+    // --- Extract text from PDF using pdf-parse (works on Vercel) ---
+    console.log(
+      `[Upload] Starting PDF text extraction for file: ${file.name} (${file.size} bytes)`
+    );
+    
     const PDFParse = await initPdfParse();
     const pdfParser = new PDFParse({ data: buffer });
     const pdfData = await pdfParser.getText();
     let extractedText = pdfData.text?.trim() || "";
     let isImageBased = false;
+    
+    console.log(
+      `[Upload] PDF text extraction complete. Extracted ${extractedText.length} characters`
+    );
 
     const JSON_TEMPLATE = createEmptyResumeTemplate();
     const openai = getOpenAI();
@@ -172,9 +183,11 @@ IMPORTANT: Do not return empty strings or empty arrays unless the information is
           ];
           isImageBased = false;
         }
-      } catch {
+      } catch (error) {
+        console.error("[Upload] Image extraction error:", error);
+        const errorMsg = error instanceof Error ? error.message : String(error);
         throw new Error(
-          "PDF appears to be image-based but the image is too large to process. Please use a smaller PDF or ensure it's text-based."
+          `PDF appears to be image-based but could not be processed. ${errorMsg}. Please try a different PDF or ensure it's text-based.`
         );
       }
     } else {
@@ -263,9 +276,32 @@ IMPORTANT: Do not return empty strings or empty arrays unless the information is
       resumeData,
     });
   } catch (error: unknown) {
-    console.error(error);
+    console.error("[Upload] Processing error:", error);
     const message =
       error instanceof Error ? error.message : "Unknown error occurred";
+    
+    // Update file status to failed if fileRecord was created
+    try {
+      if (fileRecord?.id && userId) {
+        await prisma.file.update({
+          where: { id: fileRecord.id },
+          data: { status: "failed" },
+        });
+        
+        await prisma.resumeHistory.create({
+          data: {
+            userId,
+            fileId: fileRecord.id,
+            action: "extract",
+            status: "failed",
+            message: `Processing failed: ${message}`,
+          },
+        });
+      }
+    } catch (updateError) {
+      console.error("[Upload] Failed to update file status:", updateError);
+    }
+    
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
