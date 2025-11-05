@@ -31,12 +31,11 @@ export async function POST(req: NextRequest) {
     );
   } catch (err: unknown) {
     const errorMessage =
-      err instanceof Error ? err.message : "Webhook signature verification failed";
+      err instanceof Error
+        ? err.message
+        : "Webhook signature verification failed";
     console.error("Webhook signature verification failed:", errorMessage);
-    return NextResponse.json(
-      { error: errorMessage },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: errorMessage }, { status: 400 });
   }
 
   // Log all webhook events for debugging
@@ -49,35 +48,59 @@ export async function POST(req: NextRequest) {
   try {
     switch (event.type) {
       case "invoice.paid":
-        await handleInvoicePaid(event.data.object as Stripe.Invoice);
+        await handleInvoicePaid(event.data.object as Stripe.Invoice).catch(
+          (err) => {
+            console.error("[Webhook] Error in handleInvoicePaid:", err);
+          }
+        );
         break;
 
       case "customer.subscription.updated":
-        await handleSubscriptionUpdated(event.data.object as Stripe.Subscription);
+        await handleSubscriptionUpdated(
+          event.data.object as Stripe.Subscription
+        ).catch((err) => {
+          console.error("[Webhook] Error in handleSubscriptionUpdated:", err);
+        });
         break;
 
       case "customer.subscription.deleted":
-        await handleSubscriptionDeleted(event.data.object as Stripe.Subscription);
+        await handleSubscriptionDeleted(
+          event.data.object as Stripe.Subscription
+        ).catch((err) => {
+          console.error("[Webhook] Error in handleSubscriptionDeleted:", err);
+        });
         break;
 
       case "checkout.session.completed":
-        await handleCheckoutCompleted(event.data.object as Stripe.Checkout.Session);
+        await handleCheckoutCompleted(
+          event.data.object as Stripe.Checkout.Session
+        ).catch((err) => {
+          console.error("[Webhook] Error in handleCheckoutCompleted:", err);
+        });
         break;
 
       case "customer.subscription.created":
-        await handleSubscriptionCreated(event.data.object as Stripe.Subscription);
+        await handleSubscriptionCreated(
+          event.data.object as Stripe.Subscription
+        ).catch((err) => {
+          console.error("[Webhook] Error in handleSubscriptionCreated:", err);
+        });
         break;
 
       default:
         console.log(`[Webhook] Unhandled event type: ${event.type}`);
     }
 
+    // Always return success to Stripe to prevent retries for non-critical errors
     return NextResponse.json({ received: true });
   } catch (error: unknown) {
     console.error(`[Webhook] Error processing event ${event.type}:`, error);
-    const errorMessage =
-      error instanceof Error ? error.message : "Webhook handler failed";
-    return NextResponse.json({ error: errorMessage }, { status: 500 });
+    // Still return 200 to prevent Stripe from retrying indefinitely
+    // Log the error for debugging but don't crash the app
+    return NextResponse.json({
+      received: true,
+      error: "Webhook processed with errors",
+    });
   }
 }
 
@@ -94,10 +117,31 @@ async function handleInvoicePaid(invoice: Stripe.Invoice) {
   const subscription = await stripe.subscriptions.retrieve(subscriptionId);
   const customerId = subscription.customer as string;
 
-  // Find user by subscription ID
-  const user = await prisma.user.findFirst({
+  // Find user by subscription ID first
+  let user = await prisma.user.findFirst({
     where: { subscriptionId: subscriptionId },
   });
+
+  // If not found, try to find by customer email
+  if (!user) {
+    const customer = await stripe.customers.retrieve(customerId);
+    if (typeof customer !== "string" && !customer.deleted && customer.email) {
+      user = await prisma.user.findUnique({
+        where: { email: customer.email },
+      });
+
+      // If user found, update subscription ID
+      if (user) {
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { subscriptionId: subscriptionId },
+        });
+        console.log(
+          `[Webhook] Linked subscription ${subscriptionId} to user ${user.id} by email`
+        );
+      }
+    }
+  }
 
   if (!user) {
     console.log(`[Webhook] User not found for subscription ${subscriptionId}`);
@@ -138,9 +182,34 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
     subscriptionId: subscription.id,
   });
 
-  const user = await prisma.user.findFirst({
+  // Find user by subscription ID first
+  let user = await prisma.user.findFirst({
     where: { subscriptionId: subscription.id },
   });
+
+  // If not found, try to find by customer email
+  if (!user) {
+    const customerId = subscription.customer as string;
+    const stripe = getStripe();
+    const customer = await stripe.customers.retrieve(customerId);
+
+    if (typeof customer !== "string" && !customer.deleted && customer.email) {
+      user = await prisma.user.findUnique({
+        where: { email: customer.email },
+      });
+
+      // If user found, update subscription ID
+      if (user) {
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { subscriptionId: subscription.id },
+        });
+        console.log(
+          `[Webhook] Linked subscription ${subscription.id} to user ${user.id} by email`
+        );
+      }
+    }
+  }
 
   if (!user) {
     console.log(`[Webhook] User not found for subscription ${subscription.id}`);
@@ -193,9 +262,7 @@ async function handleSubscriptionDeleted(subscription: Stripe.Subscription) {
   console.log(`[Webhook] Reset user ${user.id} to FREE plan`);
 }
 
-async function handleCheckoutCompleted(
-  session: Stripe.Checkout.Session
-) {
+async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
   console.log("[Webhook] Processing checkout.session.completed", {
     sessionId: session.id,
   });
@@ -242,11 +309,11 @@ async function handleSubscriptionCreated(subscription: Stripe.Subscription) {
   });
 
   const customerId = subscription.customer as string;
-  
+
   // Find user by customer ID (via subscription metadata or email lookup)
   // For now, we'll use the checkout.session.completed handler which already saves subscriptionId
   // This is a backup handler in case checkout.session.completed doesn't fire
-  
+
   // Get customer to find user email
   const stripe = getStripe();
   const customer = await stripe.customers.retrieve(customerId);
@@ -292,4 +359,3 @@ async function handleSubscriptionCreated(subscription: Stripe.Subscription) {
     );
   }
 }
-

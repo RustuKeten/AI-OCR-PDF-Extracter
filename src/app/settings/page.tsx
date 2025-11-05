@@ -2,7 +2,7 @@
 
 import { useSession } from "next-auth/react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState, Suspense } from "react";
+import { useEffect, useState, Suspense, useCallback } from "react";
 import { Navigation } from "@/components/navigation";
 import { Footer } from "@/components/footer";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
@@ -29,6 +29,35 @@ function SettingsContent() {
   const [hasSubscription, setHasSubscription] = useState(false);
   const [stripePublicKey, setStripePublicKey] = useState<string | null>(null);
 
+  const fetchUserData = useCallback(async () => {
+    try {
+      const response = await fetch("/api/files/credits");
+      if (response.ok) {
+        const data = await response.json();
+        setCredits(data.credits || 1000);
+        setPlanType(data.planType || "FREE");
+        // Check if user has a subscription
+        setHasSubscription(data.hasSubscription || false);
+      }
+    } catch (error) {
+      console.error("Error fetching user data:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const fetchStripeConfig = async () => {
+    try {
+      const response = await fetch("/api/stripe/config");
+      if (response.ok) {
+        const data = await response.json();
+        setStripePublicKey(data.publicKey || null);
+      }
+    } catch (error) {
+      console.error("Error fetching Stripe config:", error);
+    }
+  };
+
   useEffect(() => {
     if (status === "loading") return;
     if (!session) {
@@ -53,38 +82,22 @@ function SettingsContent() {
       router.replace("/settings");
     }
 
+    // Fetch user data after handling redirects to ensure subscription status is updated
     fetchUserData();
     fetchStripeConfig();
-  }, [session, status, router, searchParams]);
+  }, [session, status, router, searchParams, fetchUserData]);
 
-  const fetchStripeConfig = async () => {
-    try {
-      const response = await fetch("/api/stripe/config");
-      if (response.ok) {
-        const data = await response.json();
-        setStripePublicKey(data.publicKey || null);
-      }
-    } catch (error) {
-      console.error("Error fetching Stripe config:", error);
+  // Refetch user data when success parameter is present to get updated subscription status
+  useEffect(() => {
+    const success = searchParams.get("success");
+    if (success) {
+      // Small delay to allow webhook to process
+      const timer = setTimeout(() => {
+        fetchUserData();
+      }, 2000);
+      return () => clearTimeout(timer);
     }
-  };
-
-  const fetchUserData = async () => {
-    try {
-      const response = await fetch("/api/files/credits");
-      if (response.ok) {
-        const data = await response.json();
-        setCredits(data.credits || 1000);
-        setPlanType(data.planType || "FREE");
-        // Check if user has a subscription
-        setHasSubscription(data.hasSubscription || false);
-      }
-    } catch (error) {
-      console.error("Error fetching user data:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, [searchParams, fetchUserData]);
 
   const handleSubscribe = async (planType: "BASIC" | "PRO") => {
     if (!stripePublicKey) {
