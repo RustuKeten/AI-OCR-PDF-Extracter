@@ -83,70 +83,47 @@ export async function POST(req: Request) {
       },
     });
 
-    // --- Extract text from PDF using pdf2json (matches PDF-Scraper-App) ---
-    console.log(
-      `[Upload] Starting PDF text extraction for file: ${file.name} (${file.size} bytes)`
-    );
-
-    const extractedText = await extractTextFromPDF(buffer);
-    let isImageBased = false;
-    let hasImages = false;
-
-    console.log(
-      `[Upload] PDF text extraction complete. Extracted ${extractedText.length} characters`
-    );
+    // --- Extract text and images in parallel for better performance ---
+    const isDev = process.env.NODE_ENV === "development";
+    if (isDev) {
+      console.log(
+        `[Upload] Starting PDF processing for file: ${file.name} (${file.size} bytes)`
+      );
+    }
 
     const JSON_TEMPLATE = createEmptyResumeTemplate();
     const openai = getOpenAI();
     let messages: any[] | undefined = undefined;
 
-    // Try to extract images for ALL PDFs (handles hybrid PDFs with both text and images)
-    // Returns array of image data URLs (one per page, max 3 pages)
-    let imageDataUrls: string[] = [];
-    try {
-      imageDataUrls = await extractImagesAsBase64(buffer);
-      hasImages = imageDataUrls.length > 0;
-      if (hasImages) {
-        console.log(
-          `[Upload] Successfully extracted ${imageDataUrls.length} image(s) from PDF`
-        );
-        // Log first image size for debugging
-        if (imageDataUrls[0]) {
-          console.log(
-            `[Upload] First image size: ${imageDataUrls[0].length} bytes (base64)`
-          );
-        }
-      } else {
-        console.log("[Upload] Image extraction returned empty array");
-      }
-    } catch (imageError) {
-      const errorMsg =
-        imageError instanceof Error ? imageError.message : String(imageError);
+    // Run text and image extraction in parallel for better performance
+    const [extractedText, imageDataUrls] = await Promise.all([
+      extractTextFromPDF(buffer),
+      extractImagesAsBase64(buffer).catch(() => [] as string[]), // Don't fail if image extraction fails
+    ]);
+
+    let isImageBased = false;
+    const hasImages = imageDataUrls.length > 0;
+
+    if (isDev) {
       console.log(
-        "[Upload] No images found or image extraction failed:",
-        errorMsg
+        `[Upload] PDF extraction complete. Text: ${extractedText.length} chars, Images: ${imageDataUrls.length}`
       );
+    }
 
-      // If PDF is image-based (little text) and PDF.co API key is missing, this is a critical error
-      if (
-        extractedText.length < 50 &&
-        (errorMsg.includes("PDFCO_API_KEY") ||
-          errorMsg.includes("PDF conversion API") ||
-          errorMsg.includes("SCANNED_PDF_LIMITATION"))
-      ) {
-        console.error(
-          "[Upload] Image-based PDF detected but PDF.co API key is not configured"
-        );
-        console.error("[Upload] Extracted text length:", extractedText.length);
-        console.error("[Upload] Error message:", errorMsg);
-        throw new Error(
-          "PDF.co API key is not configured. Please set the PDFCO_API_KEY environment variable in Vercel to process image-based PDFs."
+    // Early exit: If we have sufficient text (>=100 chars), skip image processing for performance
+    // Only process images if text is insufficient (likely image-based PDF)
+    if (extractedText.length >= 100 && imageDataUrls.length === 0) {
+      // Text-based PDF with sufficient text, skip image extraction
+      if (isDev) {
+        console.log(
+          "[Upload] Text-based PDF detected, skipping image processing"
         );
       }
-
-      // Don't throw error - continue with text-only processing for hybrid PDFs
-      hasImages = false;
-      imageDataUrls = [];
+    } else if (extractedText.length < 50 && imageDataUrls.length === 0) {
+      // Image-based PDF but no images extracted - check if API key is missing
+      throw new Error(
+        "PDF.co API key is not configured. Please set the PDFCO_API_KEY environment variable in Vercel to process image-based PDFs."
+      );
     }
 
     // Build messages based on what we have: text-only, image-only, or hybrid (text + images)
@@ -351,34 +328,14 @@ IMPORTANT: Do not return empty strings or empty arrays unless the information is
       );
     }
 
-    console.log("[Upload] Calling OpenAI for structured extraction...");
-    console.log(
-      `[Upload] Model: ${
-        isImageBased ? "gpt-4o" : "gpt-4o-mini"
-      }, Messages count: ${messages.length}`
-    );
-    console.log(
-      `[Upload] Extracted text length: ${extractedText.length} characters`
-    );
-    if (hasImages && imageDataUrls.length > 0) {
+    // Only log in development for performance
+    if (isDev) {
+      console.log("[Upload] Calling OpenAI for structured extraction...");
       console.log(
-        `[Upload] Sending ${imageDataUrls.length} image(s) to OpenAI`
+        `[Upload] Model: ${isImageBased ? "gpt-4o" : "gpt-4o-mini"}, Text: ${
+          extractedText.length
+        } chars, Images: ${imageDataUrls.length}`
       );
-      // Log message structure for debugging
-      const userMessage = messages.find((m: any) => m.role === "user");
-      if (userMessage && Array.isArray(userMessage.content)) {
-        const imageCount = userMessage.content.filter(
-          (item: any) => item.type === "image_url"
-        ).length;
-        const textCount = userMessage.content.filter(
-          (item: any) => item.type === "text"
-        ).length;
-        console.log(
-          `[Upload] Message contains ${textCount} text item(s) and ${imageCount} image(s) in content array`
-        );
-      }
-    } else {
-      console.log("[Upload] Text-only processing (no images)");
     }
 
     const completion = await openai.chat.completions.create({
@@ -454,45 +411,45 @@ IMPORTANT: Do not return empty strings or empty arrays unless the information is
 
     result = reorderResumeData(result);
 
-    // --- Save extracted data ---
-    // Update file status
-    await prisma.file.update({
-      where: { id: fileRecord.id },
-      data: {
-        status: "completed",
-      },
-    });
+    // --- Save extracted data and update credits in parallel for better performance ---
+    await Promise.all([
+      // Update file status
+      prisma.file.update({
+        where: { id: fileRecord.id },
+        data: { status: "completed" },
+      }),
+      // Create or update ResumeData
+      prisma.resumeData.upsert({
+        where: { fileId: fileRecord.id },
+        create: {
+          userId: userId!,
+          fileId: fileRecord.id,
+          data: result as any,
+        },
+        update: {
+          data: result as any,
+        },
+      }),
+      // Create history record
+      prisma.resumeHistory.create({
+        data: {
+          userId: userId!,
+          fileId: fileRecord.id,
+          action: "extract",
+          status: "success",
+          message: "Resume data extracted successfully",
+        },
+      }),
+      // Deduct credits
+      prisma.user.update({
+        where: { id: userId },
+        data: { credits: { decrement: CREDITS_REQUIRED } },
+      }),
+    ]);
 
-    // Create or update ResumeData with the extracted JSON
-    await prisma.resumeData.upsert({
-      where: { fileId: fileRecord.id },
-      create: {
-        userId: userId!,
-        fileId: fileRecord.id,
-        data: result as any,
-      },
-      update: {
-        data: result as any,
-      },
-    });
-
-    await prisma.resumeHistory.create({
-      data: {
-        userId,
-        fileId: fileRecord.id,
-        action: "extract",
-        status: "success",
-        message: "Resume data extracted successfully",
-      },
-    });
-
-    // --- Deduct credits ---
-    await prisma.user.update({
-      where: { id: userId },
-      data: { credits: { decrement: CREDITS_REQUIRED } },
-    });
-
-    console.log("[Upload] Processing completed successfully");
+    if (isDev) {
+      console.log("[Upload] Processing completed successfully");
+    }
 
     return NextResponse.json(result);
   } catch (error: unknown) {
@@ -682,11 +639,6 @@ async function extractImagesAsBase64(buffer: Buffer): Promise<string[]> {
 
           if (xObject) {
             const keys = xObject.keys?.() || [];
-            console.log(
-              `[Image Extraction] Found ${
-                keys.length
-              } XObject entries in page ${pageIndex + 1}`
-            );
 
             for (const key of keys) {
               const xObjectItem = xObject.lookup?.(key);
@@ -695,12 +647,6 @@ async function extractImagesAsBase64(buffer: Buffer): Promise<string[]> {
                 const subtype = xObjectItem.lookup("Subtype");
 
                 if (subtype?.name === "Image") {
-                  console.log(
-                    `[Image Extraction] Found Image XObject: ${key} on page ${
-                      pageIndex + 1
-                    }`
-                  );
-
                   // Try to get image bytes
                   let imageBytes =
                     xObjectItem.contents || xObjectItem.lookup("Data");
@@ -713,12 +659,6 @@ async function extractImagesAsBase64(buffer: Buffer): Promise<string[]> {
                   }
 
                   if (imageBytes && imageBytes.length > 1000) {
-                    console.log(
-                      `[Image Extraction] Found image bytes: ${
-                        imageBytes.length
-                      } bytes on page ${pageIndex + 1}`
-                    );
-
                     // Detect MIME type
                     let mimeType = "image/jpeg";
                     const contentBuffer = Buffer.from(imageBytes);
@@ -858,7 +798,6 @@ async function convertPdfToImageViaApi(buffer: Buffer): Promise<string[]> {
     // Step 1: Upload the PDF file to PDF.co using base64
     const base64Pdf = buffer.toString("base64");
 
-    console.log("[Image Extraction] Step 1: Uploading PDF to PDF.co...");
     const uploadResponse = await fetch(
       "https://api.pdf.co/v1/file/upload/base64",
       {
@@ -889,14 +828,10 @@ async function convertPdfToImageViaApi(buffer: Buffer): Promise<string[]> {
     }
 
     const pdfUrl = uploadData.url;
-    console.log(`[Image Extraction] PDF uploaded successfully, URL: ${pdfUrl}`);
 
     // Step 2: Convert PDF to PNG using the uploaded URL
     // Note: PDF.co pages are 0-indexed
     // Only request pages that actually exist
-    console.log(
-      `[Image Extraction] Step 2: Converting PDF to PNG (pages: ${pagesParam})...`
-    );
     const convertResponse = await fetch(
       "https://api.pdf.co/v1/pdf/convert/to/png",
       {
@@ -932,39 +867,37 @@ async function convertPdfToImageViaApi(buffer: Buffer): Promise<string[]> {
         `[Image Extraction] Image conversion successful, ${convertData.urls.length} pages converted`
       );
 
-      // Use maxPagesToConvert which was calculated earlier
+      // Download images in parallel for better performance
       const maxPages =
         maxPagesToConvert || Math.min(convertData.urls.length, 3);
-      for (let i = 0; i < Math.min(convertData.urls.length, maxPages); i++) {
-        const imageUrl = convertData.urls[i];
-        console.log(
-          `[Image Extraction] Downloading image from page ${i + 1}: ${imageUrl}`
-        );
+      const downloadPromises = convertData.urls
+        .slice(0, maxPages)
+        .map(async (imageUrl: string) => {
+          try {
+            const imageResponse = await fetch(imageUrl);
+            if (!imageResponse.ok) {
+              return null;
+            }
 
-        const imageResponse = await fetch(imageUrl);
-        if (!imageResponse.ok) {
-          console.warn(
-            `[Image Extraction] Failed to download image from page ${i + 1}: ${
-              imageResponse.status
-            }`
-          );
-          continue;
-        }
+            const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
+            const base64Image = imageBuffer.toString("base64");
+            const dataUrl = `data:image/png;base64,${base64Image}`;
 
-        const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
-        const base64Image = imageBuffer.toString("base64");
-        const dataUrl = `data:image/png;base64,${base64Image}`;
+            // Check size per image (4MB limit for faster processing)
+            if (dataUrl.length > 4000000) {
+              return null;
+            }
 
-        // Check size per image
-        if (dataUrl.length > 4000000) {
-          console.warn(
-            `[Image Extraction] Image from page ${i + 1} is too large, skipping`
-          );
-          continue;
-        }
+            return dataUrl;
+          } catch {
+            return null;
+          }
+        });
 
-        imageDataUrls.push(dataUrl);
-      }
+      const downloadedImages = await Promise.all(downloadPromises);
+      imageDataUrls.push(
+        ...downloadedImages.filter((img): img is string => img !== null)
+      );
 
       if (imageDataUrls.length > 0) {
         console.log(
