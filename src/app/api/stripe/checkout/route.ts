@@ -49,6 +49,20 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Get base URL dynamically from request headers
+    // This ensures we use the correct domain even if NEXTAUTH_URL is wrong
+    const host = req.headers.get("host") || req.headers.get("x-forwarded-host");
+    const protocol = req.headers.get("x-forwarded-proto") || "https";
+    // Prioritize request headers over NEXTAUTH_URL to avoid wrong domain issues
+    const baseUrl = host ? `${protocol}://${host}` : process.env.NEXTAUTH_URL || "";
+    
+    if (!baseUrl) {
+      return NextResponse.json(
+        { error: "Unable to determine base URL" },
+        { status: 500 }
+      );
+    }
+
     // Create or get Stripe customer
     let customerId: string;
     const existingUser = await prisma.user.findUnique({
@@ -92,7 +106,7 @@ export async function POST(req: NextRequest) {
       customerId = customer.id;
     }
 
-    // Create checkout session
+    // Create checkout session with dynamic base URL
     const checkoutSession = await stripe.checkout.sessions.create({
       customer: customerId,
       payment_method_types: ["card"],
@@ -103,8 +117,8 @@ export async function POST(req: NextRequest) {
         },
       ],
       mode: "subscription",
-      success_url: `${process.env.NEXTAUTH_URL}/settings?success=true&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.NEXTAUTH_URL}/settings?canceled=true`,
+      success_url: `${baseUrl}/settings?success=true&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${baseUrl}/settings?canceled=true`,
       metadata: {
         userId: userId,
         planType: planType,

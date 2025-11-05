@@ -27,6 +27,21 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Get base URL dynamically from request headers
+    // Prioritize request headers over NEXTAUTH_URL to avoid wrong domain issues
+    const host = req.headers.get("host") || req.headers.get("x-forwarded-host");
+    const protocol = req.headers.get("x-forwarded-proto") || "https";
+    const baseUrl = host
+      ? `${protocol}://${host}`
+      : process.env.NEXTAUTH_URL || "";
+
+    if (!baseUrl) {
+      return NextResponse.json(
+        { error: "Unable to determine base URL" },
+        { status: 500 }
+      );
+    }
+
     // Get customer ID from subscription
     const stripe = getStripe();
     const subscription = await stripe.subscriptions.retrieve(
@@ -34,10 +49,10 @@ export async function POST(req: NextRequest) {
     );
     const customerId = subscription.customer as string;
 
-    // Create billing portal session
+    // Create billing portal session with dynamic base URL
     const portalSession = await stripe.billingPortal.sessions.create({
       customer: customerId,
-      return_url: `${process.env.NEXTAUTH_URL}/settings`,
+      return_url: `${baseUrl}/settings`,
     });
 
     return NextResponse.json({
@@ -46,8 +61,9 @@ export async function POST(req: NextRequest) {
   } catch (error: unknown) {
     console.error("Stripe portal error:", error);
     const errorMessage =
-      error instanceof Error ? error.message : "Failed to create portal session";
+      error instanceof Error
+        ? error.message
+        : "Failed to create portal session";
     return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
 }
-
