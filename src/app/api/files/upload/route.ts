@@ -106,16 +106,47 @@ export async function POST(req: Request) {
     try {
       imageDataUrls = await extractImagesAsBase64(buffer);
       hasImages = imageDataUrls.length > 0;
-      console.log(
-        `[Upload] Successfully extracted ${imageDataUrls.length} images from PDF`
-      );
+      if (hasImages) {
+        console.log(
+          `[Upload] Successfully extracted ${imageDataUrls.length} image(s) from PDF`
+        );
+        // Log first image size for debugging
+        if (imageDataUrls[0]) {
+          console.log(
+            `[Upload] First image size: ${imageDataUrls[0].length} bytes (base64)`
+          );
+        }
+      } else {
+        console.log("[Upload] Image extraction returned empty array");
+      }
     } catch (imageError) {
+      const errorMsg =
+        imageError instanceof Error ? imageError.message : String(imageError);
       console.log(
         "[Upload] No images found or image extraction failed:",
-        imageError
+        errorMsg
       );
-      // Don't throw error - continue with text-only processing
+
+      // If PDF is image-based (little text) and PDF.co API key is missing, this is a critical error
+      if (
+        extractedText.length < 50 &&
+        (errorMsg.includes("PDFCO_API_KEY") ||
+          errorMsg.includes("PDF conversion API") ||
+          errorMsg.includes("SCANNED_PDF_LIMITATION"))
+      ) {
+        console.error(
+          "[Upload] Image-based PDF detected but PDF.co API key is not configured"
+        );
+        console.error("[Upload] Extracted text length:", extractedText.length);
+        console.error("[Upload] Error message:", errorMsg);
+        throw new Error(
+          "PDF.co API key is not configured. Please set the PDFCO_API_KEY environment variable in Vercel to process image-based PDFs."
+        );
+      }
+
+      // Don't throw error - continue with text-only processing for hybrid PDFs
       hasImages = false;
+      imageDataUrls = [];
     }
 
     // Build messages based on what we have: text-only, image-only, or hybrid (text + images)
@@ -187,14 +218,63 @@ IMPORTANT: Analyze all pages of the resume. Do not return empty strings or empty
       ];
 
       // Add all images to content array (multi-page support)
+      // Validate and add each image
+      let validImageCount = 0;
       for (const imageDataUrl of imageDataUrls) {
+        // Validate image data URL format
+        if (!imageDataUrl || typeof imageDataUrl !== "string") {
+          console.warn("[Upload] Skipping invalid image data URL");
+          continue;
+        }
+
+        const imageMatch = imageDataUrl.match(
+          /^data:image\/(png|jpeg|jpg);base64,([^\s\n]+)$/i
+        );
+        if (!imageMatch) {
+          console.warn(
+            "[Upload] Image data URL format invalid:",
+            imageDataUrl.substring(0, 50)
+          );
+          continue;
+        }
+
+        const base64Data = imageMatch[2];
+        if (!base64Data || base64Data.length === 0) {
+          console.warn("[Upload] Image has no base64 data");
+          continue;
+        }
+
+        // Check size (OpenAI has a 20MB limit per image)
+        if (imageDataUrl.length > 20000000) {
+          console.warn(
+            `[Upload] Image too large (${(
+              imageDataUrl.length /
+              1024 /
+              1024
+            ).toFixed(2)}MB), skipping`
+          );
+          continue;
+        }
+
         contentArray.push({
           type: "image_url",
           image_url: {
             url: imageDataUrl,
           },
         });
+        validImageCount++;
       }
+
+      if (validImageCount === 0) {
+        console.error("[Upload] No valid images found after validation");
+        throw new Error(
+          "Failed to prepare images for OpenAI. The images may be corrupted or invalid."
+        );
+      }
+
+      console.log(
+        `[Upload] Added ${validImageCount} valid image(s) to OpenAI request`
+      );
 
       messages = [
         {
@@ -210,7 +290,22 @@ IMPORTANT: Analyze all pages of the resume. Do not return empty strings or empty
     }
 
     // If no images found or image extraction failed, use text-only processing
+    // But if PDF is image-based (little text), we should have failed earlier
     if (!hasImages || imageDataUrls.length === 0 || !messages) {
+      // If we have very little text and no images, this is likely an image-based PDF we couldn't process
+      if (extractedText.length < 50) {
+        console.error(
+          "[Upload] Very little text extracted and no images found - this may be an image-based PDF"
+        );
+        console.error(
+          "[Upload] Extracted text:",
+          extractedText.substring(0, 100)
+        );
+        // If we have less than 50 characters and no images, throw an error
+        throw new Error(
+          "Cannot process image-based PDF. The PDF appears to be a scanned/image-based document with insufficient text. Please ensure PDFCO_API_KEY is configured in Vercel to process image-based PDFs."
+        );
+      }
       isImageBased = false;
       messages = [
         {
@@ -250,16 +345,112 @@ IMPORTANT: Do not return empty strings or empty arrays unless the information is
     }
 
     // --- Call OpenAI for structured extraction ---
+    if (!messages || messages.length === 0) {
+      throw new Error(
+        "Failed to prepare messages for OpenAI. Please try again."
+      );
+    }
+
     console.log("[Upload] Calling OpenAI for structured extraction...");
+    console.log(
+      `[Upload] Model: ${
+        isImageBased ? "gpt-4o" : "gpt-4o-mini"
+      }, Messages count: ${messages.length}`
+    );
+    console.log(
+      `[Upload] Extracted text length: ${extractedText.length} characters`
+    );
+    if (hasImages && imageDataUrls.length > 0) {
+      console.log(
+        `[Upload] Sending ${imageDataUrls.length} image(s) to OpenAI`
+      );
+      // Log message structure for debugging
+      const userMessage = messages.find((m: any) => m.role === "user");
+      if (userMessage && Array.isArray(userMessage.content)) {
+        const imageCount = userMessage.content.filter(
+          (item: any) => item.type === "image_url"
+        ).length;
+        const textCount = userMessage.content.filter(
+          (item: any) => item.type === "text"
+        ).length;
+        console.log(
+          `[Upload] Message contains ${textCount} text item(s) and ${imageCount} image(s) in content array`
+        );
+      }
+    } else {
+      console.log("[Upload] Text-only processing (no images)");
+    }
+
     const completion = await openai.chat.completions.create({
       model: isImageBased ? "gpt-4o" : "gpt-4o-mini",
       response_format: { type: "json_object" },
       messages,
     });
 
-    let result = JSON.parse(
-      completion.choices[0].message.content || "{}"
-    ) as ResumeData;
+    const responseContent = completion.choices[0]?.message?.content;
+    if (
+      !responseContent ||
+      responseContent.trim() === "" ||
+      responseContent === "{}"
+    ) {
+      console.error("[Upload] OpenAI returned empty or invalid response");
+      console.error(
+        "[Upload] Full completion:",
+        JSON.stringify(completion, null, 2)
+      );
+      throw new Error(
+        "OpenAI returned an empty response. The PDF may be too complex or the image quality may be insufficient."
+      );
+    }
+
+    console.log(
+      `[Upload] OpenAI response length: ${responseContent.length} characters`
+    );
+    let result: ResumeData;
+    try {
+      result = JSON.parse(responseContent) as ResumeData;
+    } catch (parseError) {
+      console.error("[Upload] Failed to parse OpenAI response as JSON");
+      console.error(
+        "[Upload] Response content:",
+        responseContent.substring(0, 500)
+      );
+      throw new Error(
+        `Failed to parse OpenAI response: ${
+          parseError instanceof Error ? parseError.message : "Unknown error"
+        }`
+      );
+    }
+
+    // Validate that we got actual data, not just empty structure
+    const isEmpty =
+      !result ||
+      (!result.profile?.name &&
+        !result.profile?.surname &&
+        (!result.workExperiences || result.workExperiences.length === 0) &&
+        (!result.educations || result.educations.length === 0) &&
+        (!result.skills || result.skills.length === 0));
+
+    if (isEmpty) {
+      console.error("[Upload] OpenAI returned empty resume data structure");
+      console.error(
+        "[Upload] Response content:",
+        responseContent.substring(0, 1000)
+      );
+      console.error("[Upload] Full result:", JSON.stringify(result, null, 2));
+
+      // If we were processing an image-based PDF and got empty results, this is an error
+      if (isImageBased || extractedText.length < 50) {
+        throw new Error(
+          "Failed to extract data from image-based PDF. The PDF may be too complex, the image quality may be insufficient, or the PDF may not contain readable resume information."
+        );
+      }
+
+      // For text-based PDFs, log warning but still return result
+      console.warn(
+        "[Upload] Text-based PDF returned minimal data - this may be expected for some resumes"
+      );
+    }
 
     result = reorderResumeData(result);
 
@@ -638,6 +829,31 @@ async function convertPdfToImageViaApi(buffer: Buffer): Promise<string[]> {
 
   console.log("[Image Extraction] Converting PDF to image via PDF.co API...");
 
+  // First, get the page count to request only existing pages
+  const { PDFDocument } = await import("pdf-lib");
+  const pdfDoc = await PDFDocument.load(buffer);
+  const pages = pdfDoc.getPages();
+  const pageCount = pages.length;
+  const maxPagesToConvert = Math.min(pageCount, 3); // Convert up to 3 pages, but only if they exist
+
+  console.log(
+    `[Image Extraction] PDF has ${pageCount} page(s), will convert ${maxPagesToConvert} page(s)`
+  );
+
+  // Build pages parameter based on actual page count
+  // PDF.co uses 0-indexed pages, so:
+  // 1 page: "0"
+  // 2 pages: "0-1"
+  // 3+ pages: "0-2" (convert first 3)
+  let pagesParam: string;
+  if (maxPagesToConvert === 1) {
+    pagesParam = "0";
+  } else {
+    pagesParam = `0-${maxPagesToConvert - 1}`;
+  }
+
+  console.log(`[Image Extraction] Requesting pages: ${pagesParam}`);
+
   try {
     // Step 1: Upload the PDF file to PDF.co using base64
     const base64Pdf = buffer.toString("base64");
@@ -677,9 +893,9 @@ async function convertPdfToImageViaApi(buffer: Buffer): Promise<string[]> {
 
     // Step 2: Convert PDF to PNG using the uploaded URL
     // Note: PDF.co pages are 0-indexed
-    // Convert up to 3 pages (0, 1, 2) for multi-page resumes
+    // Only request pages that actually exist
     console.log(
-      "[Image Extraction] Step 2: Converting PDF to PNG (up to 3 pages)..."
+      `[Image Extraction] Step 2: Converting PDF to PNG (pages: ${pagesParam})...`
     );
     const convertResponse = await fetch(
       "https://api.pdf.co/v1/pdf/convert/to/png",
@@ -691,7 +907,7 @@ async function convertPdfToImageViaApi(buffer: Buffer): Promise<string[]> {
         },
         body: JSON.stringify({
           url: pdfUrl,
-          pages: "0-2", // Convert first 3 pages (0-indexed: 0, 1, 2)
+          pages: pagesParam, // Only request pages that exist (0-indexed)
           async: false,
         }),
       }
@@ -716,7 +932,10 @@ async function convertPdfToImageViaApi(buffer: Buffer): Promise<string[]> {
         `[Image Extraction] Image conversion successful, ${convertData.urls.length} pages converted`
       );
 
-      for (let i = 0; i < Math.min(convertData.urls.length, 3); i++) {
+      // Use maxPagesToConvert which was calculated earlier
+      const maxPages =
+        maxPagesToConvert || Math.min(convertData.urls.length, 3);
+      for (let i = 0; i < Math.min(convertData.urls.length, maxPages); i++) {
         const imageUrl = convertData.urls[i];
         console.log(
           `[Image Extraction] Downloading image from page ${i + 1}: ${imageUrl}`
