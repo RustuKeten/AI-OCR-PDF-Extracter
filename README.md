@@ -82,7 +82,27 @@ cp .env.example .env.local
 
 Then update `.env.local` with your actual values. See `.env.example` for all required variables.
 
-### 4. Set Up Stripe (Optional but Recommended)
+### 4. Set Up PDF.co API (Required for Image-Based PDFs)
+
+**PDF.co API** is used as a fallback to convert scanned PDFs to images when embedded images are not found. This is required for processing scanned/image-based PDFs.
+
+1. Create a PDF.co account at [pdf.co](https://pdf.co)
+2. Navigate to **API Keys** section
+3. Copy your **API Key** (starts with your account identifier)
+4. Add to your `.env.local` file:
+   ```env
+   PDFCO_API_KEY="your-pdf-co-api-key"
+   ```
+
+**Note**: PDF.co has a free tier with limited requests. For production use, consider upgrading to a paid plan.
+
+**Without PDF.co API Key:**
+
+- Text-based PDFs will still work
+- PDFs with embedded images will still work
+- Scanned PDFs (without embedded images) will fail with a clear error message
+
+### 5. Set Up Stripe (Optional but Recommended)
 
 1. Create a Stripe account at [stripe.com](https://stripe.com)
 2. Navigate to **Developers** > **API Keys** (make sure you're in **Test Mode**)
@@ -97,14 +117,14 @@ Then update `.env.local` with your actual values. See `.env.example` for all req
    - Copy the **Signing secret** (starts with `whsec_`)
 6. Update your `.env.local` file with all Stripe keys
 
-### 5. Set Up Supabase Database
+### 6. Set Up Supabase Database
 
 1. Create a new Supabase project at [supabase.com](https://supabase.com)
 2. Navigate to **Settings** > **Database**
 3. Copy the connection string from **Connection string** section (use "URI" format)
 4. Update `DATABASE_URL` in your `.env.local` file
 
-### 6. Run Database Migrations
+### 7. Run Database Migrations
 
 ```bash
 # Generate Prisma Client
@@ -117,7 +137,7 @@ npm run prisma:migrate
 npm run prisma:studio
 ```
 
-### 7. Start Development Server
+### 8. Start Development Server
 
 ```bash
 npm run dev
@@ -333,9 +353,84 @@ The extracted JSON follows this structure (in order):
 
 - **Text-Based PDFs**: Uses `gpt-4o-mini` for fast, cost-effective extraction
 - **Image-Based PDFs**: Uses `gpt-4o` with Vision API for OCR
+- **Hybrid PDFs**: Handles PDFs with both text and images by sending both to OpenAI
 - **Auto-Detection**: Automatically detects PDF type and uses appropriate model
 - **File Size Limit**: 10MB maximum (client-side validation)
 - **Supported Format**: PDF only
+
+### PDF Image Extraction Architecture
+
+This application uses a **pure JavaScript + API hybrid approach** for extracting images from PDFs, specifically designed to work within **Vercel's serverless environment constraints**.
+
+#### Why This Approach?
+
+**Vercel Serverless Limitations:**
+
+- ❌ **No Native Binaries**: Serverless functions cannot run native modules like `@napi-rs/canvas`, `canvas`, or `pdf-poppler`
+- ❌ **No Canvas/Rendering**: Libraries that require canvas or rendering engines (like `pdfjs-dist` with canvas) fail in serverless
+- ❌ **No Headless Browsers**: Cannot use Puppeteer, Playwright, or similar for PDF rendering
+- ✅ **Pure JavaScript Only**: Only pure JS libraries work reliably in Vercel serverless
+
+#### Current Implementation (Serverless-Compatible)
+
+**Step 1: Extract Embedded Images with `pdf-lib`**
+
+- Uses `pdf-lib` (pure JavaScript, no native dependencies)
+- Extracts embedded JPEG/PNG images from PDF's XObject resources
+- Works for PDFs that have embedded images (hybrid PDFs)
+
+**Step 2: API Fallback for Scanned PDFs**
+
+- If no embedded images found, uses **PDF.co API** to convert PDF → PNG
+- Handles scanned PDFs that require rendering
+- Two-step process: Upload PDF → Convert to image
+
+**Step 3: OCR with OpenAI Vision**
+
+- Sends extracted/converted images to GPT-4o Vision API
+- Extracts structured data from both text and images
+
+**Libraries Used:**
+
+- `pdf-lib`: Pure JS PDF manipulation (no canvas)
+- `pdf2json`: Pure JS text extraction (no rendering)
+- `PDF.co API`: External service for PDF-to-image conversion
+
+#### Alternative Approach (For Server/Backend Apps)
+
+If you're **not using Vercel serverless** and have a **dedicated server or backend application**, you can use a more robust approach with native dependencies:
+
+**Recommended Stack:**
+
+- `pdf-lib` + `canvas` + `pdfjs-dist` - Full PDF rendering capabilities
+- `pdf-lib` + `@napi-rs/canvas` - Native canvas implementation
+- `pdf-poppler` - Full-featured PDF to image converter
+- `puppeteer` - Headless browser for PDF rendering
+
+**Why This Works on Servers:**
+
+- ✅ Native modules can be compiled during `npm install`
+- ✅ Canvas libraries work in Node.js environments
+- ✅ No function size or execution time limits
+- ✅ Can use headless browsers for complex rendering
+
+**Example Server Implementation:**
+
+```typescript
+// This approach works on servers but NOT on Vercel serverless
+import { PDFDocument } from "pdf-lib";
+import { createCanvas } from "canvas";
+import * as pdfjs from "pdfjs-dist";
+
+async function extractImagesFromPDF(buffer: Buffer) {
+  // Render PDF pages to canvas
+  // Extract images from canvas
+  // This requires native canvas dependencies
+}
+```
+
+**For Vercel Serverless:** Use the current approach (pdf-lib + PDF.co API fallback)
+**For Server/Backend:** You can use pdf-lib + canvas for more robust image extraction
 
 ### Large File Handling (Vercel Serverless Limits)
 
@@ -534,6 +629,9 @@ NEXTAUTH_SECRET="your-production-secret"  # Generate with: openssl rand -base64 
 
 # OpenAI
 OPENAI_API_KEY="your-openai-api-key"
+
+# PDF.co (Required for scanned PDF processing)
+PDFCO_API_KEY="your-pdf-co-api-key"
 
 # Stripe (Live Mode for production)
 STRIPE_SECRET_KEY="sk_live_your_stripe_secret_key"

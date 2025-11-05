@@ -188,49 +188,98 @@ IMPORTANT: Do not return empty strings or empty arrays unless the information is
 }
 
 /**
- * OCR: Use pdf-parse's getScreenshot method to extract images as base64
- * This works in Vercel serverless without native canvas dependencies
+ * OCR: Extract embedded images from PDF (no canvas required)
+ * This works in Vercel serverless environment
+ * Strategy: Search for JPEG/PNG markers in PDF buffer
  */
 async function extractImagesWithOCR(buffer: Buffer): Promise<string> {
-  // Use pdf-parse's built-in screenshot method (works in serverless)
-  const PDFParse = await initPdfTools();
-  const pdfParser = new PDFParse({ data: buffer });
+  try {
+    const { PDFDocument } = await import("pdf-lib");
 
-  const screenshotResult = await pdfParser.getScreenshot({
-    first: 1,
-    last: 1, // Only first page to reduce token usage
-    scale: 0.5, // Medium scale for better OCR quality
-    imageDataUrl: true,
-    imageBuffer: false,
-    desiredWidth: 1200, // Higher width for better OCR
-  });
+    // Load the PDF document
+    const pdfDoc = await PDFDocument.load(buffer);
 
-  const pages: string[] = [];
-
-  // Extract base64 images from screenshot result (only first page)
-  for (const pageData of screenshotResult.pages || []) {
-    if (pageData.dataUrl) {
-      pages.push(pageData.dataUrl);
-      break;
+    // Get the first page
+    const pages = pdfDoc.getPages();
+    if (pages.length === 0) {
+      throw new Error("PDF has no pages");
     }
-  }
 
-  if (pages.length === 0) {
-    throw new Error("Failed to extract images from PDF");
-  }
+    // Search for embedded JPEG/PNG images in the PDF buffer
+    // Many scanned PDFs store images as raw JPEG/PNG streams
+    const images: { data: Uint8Array; mimeType: string }[] = [];
 
-  const imageData = pages[0];
-  const imageSize = imageData.length;
+    // Look for JPEG markers (FF D8 FF) - common in scanned PDFs
+    const jpegStart = buffer.indexOf(Buffer.from([0xff, 0xd8, 0xff]));
+    if (jpegStart !== -1) {
+      // Try to find JPEG end marker (FF D9)
+      const jpegEnd = buffer.indexOf(Buffer.from([0xff, 0xd9]), jpegStart);
+      if (jpegEnd !== -1) {
+        const jpegData = buffer.slice(jpegStart, jpegEnd + 2);
+        if (jpegData.length > 1000 && jpegData.length < 5000000) {
+          // Valid JPEG size
+          images.push({ data: jpegData, mimeType: "image/jpeg" });
+        }
+      }
+    }
 
-  // If image is too large (base64 size > 4MB), return error
-  if (imageSize > 4000000) {
-    throw new Error(
-      `Image is too large (${(imageSize / 1024).toFixed(
-        0
-      )}KB base64). Please use a smaller PDF or ensure it's text-based.`
+    // Look for PNG markers (89 50 4E 47)
+    const pngStart = buffer.indexOf(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
     );
-  }
+    if (pngStart !== -1) {
+      // PNG has IEND marker at the end
+      const pngIend = buffer.indexOf(Buffer.from("IEND"), pngStart);
+      if (pngIend !== -1) {
+        const pngData = buffer.slice(pngStart, pngIend + 8); // +8 for IEND marker
+        if (pngData.length > 1000 && pngData.length < 5000000) {
+          // Valid PNG size
+          images.push({ data: pngData, mimeType: "image/png" });
+        }
+      }
+    }
 
-  // Return the image data URL for GPT-4 Vision API
-  return imageData;
+    // If we found embedded images, use the first one
+    if (images.length > 0) {
+      const image = images[0];
+
+      // Convert to base64 data URL
+      const base64Image = Buffer.from(image.data).toString("base64");
+      const dataUrl = `data:${image.mimeType};base64,${base64Image}`;
+
+      // Check size (OpenAI has a 20MB limit, but we're being conservative)
+      if (dataUrl.length > 4000000) {
+        throw new Error(
+          `Image is too large (${(dataUrl.length / 1024).toFixed(
+            0
+          )}KB base64). Please use a smaller PDF.`
+        );
+      }
+
+      return dataUrl;
+    }
+
+    // If no embedded images found, this PDF might not be a scanned PDF
+    throw new Error(
+      "No embedded images found in PDF. This PDF may not be a scanned/image-based PDF, or it uses vector graphics that cannot be extracted without rendering."
+    );
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+
+    // If it's a canvas/rendering error, provide a helpful message
+    if (
+      errorMsg.includes("canvas") ||
+      errorMsg.includes("rendering") ||
+      errorMsg.includes("worker") ||
+      errorMsg.includes("pdfjs-dist") ||
+      errorMsg.includes("Cannot find module")
+    ) {
+      throw new Error(
+        "Image-based PDF processing is currently unavailable. Please use a text-based PDF or convert your scanned PDF to a text-based format."
+      );
+    }
+
+    // Re-throw other errors
+    throw error;
+  }
 }
